@@ -24,51 +24,78 @@ export default async function handler(req, res) {
     }
 
     // Parse body robustly
+    const readStreamBody = async () => {
+      const chunks = [];
+      for await (const ch of req) chunks.push(ch);
+      return Buffer.concat(chunks).toString("utf8") || "{}";
+    };
+
     let body = req.body;
-    if (!body || typeof body !== "object") {
+    if (body && typeof body === "string") {
       try {
-        const chunks = [];
-        for await (const ch of req) chunks.push(ch);
-        const raw = Buffer.concat(chunks).toString("utf8") || "{}";
-        body = JSON.parse(raw);
-      } catch (e) {
-        return send(400, { ok: false, code: "BAD_JSON", hint: "Body must be JSON with content-type: application/json", details: String(e) });
+        body = JSON.parse(body);
+      } catch (err) {
+        return send(400, { ok: false, code: "BAD_JSON", hint: "Body must be JSON with content-type: application/json", details: String(err) });
+      }
+    } else if (Buffer.isBuffer(body)) {
+      try {
+        body = JSON.parse(body.toString("utf8"));
+      } catch (err) {
+        return send(400, { ok: false, code: "BAD_JSON", hint: "Body must be JSON", details: String(err) });
+      }
+    } else if (!body || typeof body !== "object") {
+      try {
+        body = JSON.parse(await readStreamBody());
+      } catch (err) {
+        return send(400, { ok: false, code: "BAD_JSON", hint: "Body must be JSON with content-type: application/json", details: String(err) });
       }
     }
 
     let { groupId, userId, roleId } = body || {};
     groupId = Number(groupId);
-    userId  = Number(userId);
-    roleId  = Number(roleId);
-    if (!Number.isFinite(groupId) || !Number.isFinite(userId) || !Number.isFinite(roleId)) {
+    userId = Number(userId);
+    roleId = Number(roleId);
+    const isValidId = (value) => Number.isInteger(value) && value > 0;
+    if (![groupId, userId, roleId].every(isValidId)) {
       return send(400, { ok: false, code: "MISSING_FIELDS", hint: "Provide numeric groupId, userId, roleId" });
     }
 
-    const safeJson = (t) => { try { return JSON.parse(t || "{}"); } catch { return { raw: t }; } };
+    const safeJson = (text) => {
+      try {
+        return JSON.parse(text || "{}");
+      } catch (err) {
+        return { raw: text, parseError: String(err) };
+      }
+    };
+
     const doFetch = async (url, method, payload) => {
       const ctrl = new AbortController();
-      const t = setTimeout(()=>ctrl.abort(), TIMEOUT_MS);
+      const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+      const headers = { "x-api-key": key };
+      const init = { method, headers, signal: ctrl.signal };
+
+      if (payload !== undefined) {
+        headers["content-type"] = "application/json";
+        init.body = JSON.stringify(payload);
+      }
+
       try {
-        const resp = await fetch(url, {
-          method,
-          headers: { "x-api-key": key, "content-type": "application/json" },
-          body: payload ? JSON.stringify(payload) : "{}",
-          signal: ctrl.signal
-        });
+        const resp = await fetch(url, init);
         const text = await resp.text();
         return { ok: resp.ok, status: resp.status, statusText: resp.statusText, url, method, body: safeJson(text) };
       } catch (err) {
-        return { ok: false, status: 0, statusText: "NETWORK_ERROR", url, method, error: String(err) };
+        const statusText = err?.name === "AbortError" ? "TIMEOUT" : "NETWORK_ERROR";
+        return { ok: false, status: 0, statusText, url, method, error: String(err) };
       } finally {
-        clearTimeout(t);
+        clearTimeout(timer);
       }
     };
 
     const attempts = [
       { where: "cloudV2-PATCH", url: `https://apis.roblox.com/cloud/v2/groups/${groupId}/users/${userId}/roles/${roleId}`, method: "PATCH", payload: undefined },
       { where: "cloudV2-POST",  url: `https://apis.roblox.com/cloud/v2/groups/${groupId}/users/${userId}/roles/${roleId}`, method: "POST",  payload: {} },
-      { where: "groupsV1-PATCH",url: `https://groups.roblox.com/v1/groups/${groupId}/users/${userId}`,                         method: "PATCH", payload: { roleId } },
-      { where: "groupsV1-POST", url: `https://groups.roblox.com/v1/groups/${groupId}/users/${userId}`,                         method: "POST",  payload: { roleId } },
+      { where: "groupsV1-PATCH", url: `https://groups.roblox.com/v1/groups/${groupId}/users/${userId}`,                         method: "PATCH", payload: { roleId } },
+      { where: "groupsV1-POST",  url: `https://groups.roblox.com/v1/groups/${groupId}/users/${userId}`,                         method: "POST",  payload: { roleId } },
     ];
 
     const results = [];
@@ -86,11 +113,15 @@ export default async function handler(req, res) {
       ok: false,
       code: "ALL_ATTEMPTS_FAILED",
       hint: "Check key scope (groups:read, groups:write, group access), endpoint availability, and that user/group/roleId are valid",
-      attempts: results.map(r => ({
-        where: r.where, status: r.status, statusText: r.statusText, url: r.url, error: r.error, body: r.body
-      }))
+      attempts: results.map((r) => ({
+        where: r.where,
+        status: r.status,
+        statusText: r.statusText,
+        url: r.url,
+        error: r.error,
+        body: r.body,
+      })),
     });
-
   } catch (err) {
     console.error("[RankRelay] Unhandled error:", err);
     return send(500, { ok: false, code: "UNHANDLED", details: String(err && err.stack ? err.stack : err) });
