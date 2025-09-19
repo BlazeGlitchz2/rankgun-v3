@@ -52,7 +52,7 @@ export default async function handler(req, res) {
         const resp = await fetch(url, {
           method,
           headers: { "x-api-key": key, "content-type": "application/json" },
-          body: payload ? JSON.stringify(payload) : "{}",
+          body: payload === undefined ? undefined : JSON.stringify(payload),
           signal: ctrl.signal
         });
         const text = await resp.text();
@@ -65,8 +65,7 @@ export default async function handler(req, res) {
     };
 
     const attempts = [
-      { where: "cloudV2-PATCH", url: `https://apis.roblox.com/cloud/v2/groups/${groupId}/users/${userId}/roles/${roleId}`, method: "PATCH", payload: undefined },
-      { where: "cloudV2-POST",  url: `https://apis.roblox.com/cloud/v2/groups/${groupId}/users/${userId}/roles/${roleId}`, method: "POST",  payload: {} },
+      { where: "cloudV2-PATCH", url: `https://apis.roblox.com/cloud/v2/groups/${groupId}/users/${userId}`,                    method: "PATCH", payload: { roleId } },
       { where: "groupsV1-PATCH",url: `https://groups.roblox.com/v1/groups/${groupId}/users/${userId}`,                         method: "PATCH", payload: { roleId } },
       { where: "groupsV1-POST", url: `https://groups.roblox.com/v1/groups/${groupId}/users/${userId}`,                         method: "POST",  payload: { roleId } },
     ];
