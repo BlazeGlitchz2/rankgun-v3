@@ -1,70 +1,82 @@
-// /api/promote.js — Vercel serverless function for Roblox rank changes
+// /api/promote.js — Vercel Serverless Function (Node runtime)
 // POST JSON: { "groupId": number, "userId": number, "roleId": number }
 
 export default async function handler(req, res) {
+  // Helper: send JSON and never throw
+  const send = (code, obj) => {
+    res.status(code).setHeader('content-type', 'application/json');
+    // Allow CORS (useful if you hit this from anywhere else during testing)
+    res.setHeader('access-control-allow-origin', '*');
+    res.setHeader('access-control-allow-headers', 'content-type');
+    return res.end(JSON.stringify(obj ?? {}));
+  };
+
   try {
     // 1) Method gate
     if (req.method !== 'POST') {
-      res.setHeader('Allow', 'POST');
-      return res.status(405).json({ ok: false, error: 'Method Not Allowed' });
+      res.setHeader('allow', 'POST');
+      return send(405, { ok: false, error: 'Method Not Allowed' });
     }
 
-    // 2) Env var
+    // 2) Env var (Open Cloud API key)
     const key = process.env.OPEN_CLOUD_KEY;
     if (!key || typeof key !== 'string' || key.trim() === '') {
-      return res.status(500).json({ ok: false, error: 'OPEN_CLOUD_KEY missing' });
+      return send(500, { ok: false, error: 'OPEN_CLOUD_KEY missing' });
     }
 
-    // 3) Body parsing (works whether Vercel gave us req.body or a raw stream)
-    let payload = {};
-    if (req.body && typeof req.body === 'object') {
-      payload = req.body;
-    } else {
-      const chunks = [];
-      for await (const chunk of req) chunks.push(chunk);
-      const raw = Buffer.concat(chunks).toString('utf8') || '{}';
+    // 3) Parse body robustly (works even if body wasn’t auto-parsed)
+    let body = req.body;
+    if (!body || typeof body !== 'object') {
       try {
-        payload = JSON.parse(raw);
+        const chunks = [];
+        for await (const ch of req) chunks.push(ch);
+        const raw = Buffer.concat(chunks).toString('utf8') || '{}';
+        body = JSON.parse(raw);
       } catch {
-        return res.status(400).json({ ok: false, error: 'Invalid JSON body' });
+        return send(400, { ok: false, error: 'Invalid JSON body' });
       }
     }
 
-    const { groupId, userId, roleId } = payload || {};
-    if (!Number(groupId) || !Number(userId) || !Number(roleId)) {
-      return res.status(400).json({ ok: false, error: 'Missing groupId/userId/roleId' });
+    let { groupId, userId, roleId } = body || {};
+    groupId = Number(groupId);
+    userId  = Number(userId);
+    roleId  = Number(roleId);
+
+    if (!Number.isFinite(groupId) || !Number.isFinite(userId) || !Number.isFinite(roleId)) {
+      return send(400, { ok: false, error: 'Missing or non-numeric groupId/userId/roleId' });
     }
 
-    // helper to call an endpoint and return normalized result
+    // 4) Small fetch wrapper with safe JSON
     const safeJson = (t) => { try { return JSON.parse(t || '{}'); } catch { return { raw: t }; } };
-    async function call(url, method, body) {
+    const doFetch = async (url, method, payload) => {
       const resp = await fetch(url, {
         method,
         headers: { 'x-api-key': key, 'content-type': 'application/json' },
-        body: body ? JSON.stringify(body) : '{}'
+        body: payload ? JSON.stringify(payload) : '{}',
       });
       const text = await resp.text();
       return { ok: resp.ok, status: resp.status, body: safeJson(text) };
-    }
+    };
 
-    // A) Open Cloud v2: PATCH /cloud/v2/groups/:groupId/users/:userId/roles/:roleId
-    const urlA = `https://apis.roblox.com/cloud/v2/groups/${groupId}/users/${userId}/roles/${roleId}`;
-    let r = await call(urlA, 'PATCH');
+    // 5) Try Cloud v2 (role in URL) → fallback to Groups v1 (roleId in body)
+    const urlV2 = `https://apis.roblox.com/cloud/v2/groups/${groupId}/users/${userId}/roles/${roleId}`;
+    let r = await doFetch(urlV2, 'PATCH');
 
-    // If v2 fails, B) Groups v1: PATCH /v1/groups/:groupId/users/:userId   { roleId }
     if (!r.ok) {
-      const urlB = `https://groups.roblox.com/v1/groups/${groupId}/users/${userId}`;
-      r = await call(urlB, 'PATCH', { roleId: Number(roleId) });
+      const urlV1 = `https://groups.roblox.com/v1/groups/${groupId}/users/${userId}`;
+      r = await doFetch(urlV1, 'PATCH', { roleId });
       if (!r.ok) {
-        return res.status(r.status || 500).json({ ok: false, status: r.status, body: r.body });
+        return send(r.status || 500, { ok: false, where: 'groupsV1', status: r.status, body: r.body });
       }
-      return res.json({ ok: true, where: 'groupsV1', status: r.status });
+      return send(200, { ok: true, where: 'groupsV1', status: r.status });
     }
 
-    return res.json({ ok: true, where: 'cloudV2', status: r.status });
+    return send(200, { ok: true, where: 'cloudV2', status: r.status });
 
   } catch (err) {
-    // Last-resort catch so Vercel never shows "FUNCTION_INVOCATION_FAILED"
-    return res.status(500).json({ ok: false, error: 'Unhandled', detail: String(err) });
+    // Last-resort catch: never let the function crash
+    return res
+      .status(500)
+      .json({ ok: false, error: 'Unhandled', detail: String(err && err.stack ? err.stack : err) });
   }
 }
