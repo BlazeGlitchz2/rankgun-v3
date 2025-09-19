@@ -1,0 +1,1 @@
+export default function handler(req, res){res.setHeader("content-type","application/json");res.setHeader("access-control-allow-origin","*");res.status(200).end(JSON.stringify({ok:true, env:!!process.env.OPEN_CLOUD_KEY}))}
